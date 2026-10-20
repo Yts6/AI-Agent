@@ -1,0 +1,25 @@
+{"question":"缓存命中率低于多少需要排查？","answer":"85%","keywords":["85%"],"doc":"项目文档.md"}
+{"question":"订单服务单实例能支撑多少 QPS？","answer":"800","keywords":["800"],"doc":"系统架构.md"}
+{"question":"缓存咋就崩了呢，上次那个事故","answer":"缓存雪崩","keywords":["缓存雪崩","雪崩"],"doc":"故障复盘.md"}
+{"question":"为啥消息会堆那么多","answer":"慢SQL","keywords":["慢SQL","慢 sql","全表扫描"],"doc":"故障复盘.md"}
+{"question":"内存老是不够用是啥原因","answer":"本地缓存无界HashMap","keywords":["HashMap","无界","800万"],"doc":"故障复盘.md"}
+{"question":"接口限流是多少来着","answer":"100 QPS","keywords":["100"],"doc":"API规范.md"}
+{"question":"重试几次比较合适","answer":"最多2次","keywords":["2 次","2次","两次"],"doc":"API规范.md"}
+{"question":"什么是trace_id，在哪生成","answer":"接入层生成","keywords":["接入层","Jaeger"],"doc":"系统架构.md"}
+{"question":"数据库怎么保证读性能","answer":"主从架构，从库只读","keywords":["主从","从库"],"doc":"系统架构.md"}
+{"question":"分页为什么不用offset","answer":"统一使用游标分页","keywords":["游标"],"doc":"API规范.md"}
+{"question":"Redis 主要用来做什么","answer":"热点数据缓存","keywords":["热点数据","缓存"],"doc":"系统架构.md"}
+{"question":"错误码是怎么编号的","answer":"5位，前两位业务域","keywords":["5 位","5位","业务域"],"doc":"API规范.md"}
+{"question":"手机号怎么脱敏展示","answer":"隐藏中间四位","keywords":["138****5678","中间四位","脱敏"],"doc":"数据安全.md"}
+{"question":"密钥多久换一次","answer":"90天","keywords":["90 天","90天","轮换"],"doc":"数据安全.md"}
+{"question":"审计日志要保留多久","answer":"180天","keywords":["180"],"doc":"数据安全.md"}
+{"question":"什么等级的短信要加密","answer":"L3敏感数据","keywords":["L3","加密"],"doc":"数据安全.md"}
+{"question":"压测用什么工具","answer":"JMeter和wrk","keywords":["JMeter","wrk"],"doc":"性能压测.md"}
+{"question":"TP99 是啥意思","answer":"99%请求的响应时间","keywords":["99%","响应时间"],"doc":"性能压测.md"}
+{"question":"CPU到多少算瓶颈","answer":"80%","keywords":["80"],"doc":"性能压测.md"}
+{"question":"压测数据要准备多少条","answer":"100万条","keywords":["100 万","100万"],"doc":"性能压测.md"}
+{"question":"什么时候能发版","answer":"周二周四晚上","keywords":["周二","周四"],"doc":"发布流程.md"}
+{"question":"灰度分几个阶段","answer":"4个阶段","keywords":["1%","10%","50%","100%"],"doc":"发布流程.md"}
+{"question":"回滚要多久完成","answer":"5分钟内","keywords":["5 分钟","5分钟"],"doc":"发布流程.md"}
+{"question":"哪些情况要回滚","answer":"错误率超5%","keywords":["错误率","5%"],"doc":"发布流程.md"}
+{"question":"大促前还能改代码吗","answer":"大促前7天冻结发布","keywords":["7 天","7天","冻结"],"doc":"发布流程.md"}
