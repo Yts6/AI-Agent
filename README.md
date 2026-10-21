@@ -104,22 +104,68 @@ DASHSCOPE_API_KEY=sk-你的key
 
 ### 6. 启动
 
+**方式一：使用脚本（推荐）**
+
+```powershell
+# 启动服务 + 自动开公网隧道
+.\run.ps1
+
+# 只本地运行，不开隧道（启动更快）
+.\run.ps1 -NoTunnel
+
+# 指定端口
+.\run.ps1 -Port 8080
+
+# 强制新建隧道（地址会变）
+.\run.ps1 -NewTunnel
+
+# 配置局域网防火墙（需管理员）
+.\run.ps1 -SetupLan
+
+# 修复 cpolar 服务冲突（需管理员）
+.\run.ps1 -FixCpolar
+```
+
+**方式二：直接运行 Python**
+
 ```bash
 cd AI-Agent
-python server.py
+python server.py              # 含隧道
+python server.py --no-tunnel  # 不含隧道
 ```
+
+**方式三：PyCharm 运行配置**
+
+项目已内置两个运行配置（右上角下拉切换）：
+
+| 配置名 | 说明 |
+|--------|------|
+| AI Agent Server | 含公网隧道 |
+| AI Agent Server (无隧道) | 只本地运行，启动快 |
 
 启动后会显示三个地址：
 
 ```
-   🖥  本机访问     http://127.0.0.1:8000
-   📡 局域网访问   http://192.168.1.100:8000
-   🌍 公网访问     https://xxx.cpolar.top
+   ============================================================
+    AI Agent 已启动
+   ------------------------------------------------------------
+
+    🖥  本机访问     http://127.0.0.1:8000
+    📡 局域网访问   http://192.168.1.100:8000
+
+    🌍 公网访问     https://xxx.cpolar.top
+       发这个链接给别人，他在任何网络都能访问
+
+   ============================================================
 ```
 
-浏览器打开第一个即可使用。
+浏览器打开第一个地址即可使用。
 
----
+**注意**：
+- 端口被占用时会自动切换到下一个空闲端口
+- 含隧道的模式会弹出 cpolar 窗口，**不要关闭**（可最小化）
+- 关闭 Python 进程后隧道可能保留，下次启动会复用同一地址
+
 
 ## API 申请指南
 
@@ -180,15 +226,21 @@ python server.py
 
 5. 把 `cpolar.exe` 放到项目的 `tools/cpolar/` 目录
 
-之后每次运行 `python server.py`，会自动：
+之后每次运行会自动：
 - 启动 cpolar 隧道
 - 申请公网地址
 - 在控制台显示
 
+启动方式任选：
+- `.\run.ps1`（推荐）
+- `python server.py`
+- PyCharm 运行「AI Agent Server」
+
 **注意**：
-- 免费版公网地址每次重启会变
+- 免费版公网地址 **24 小时**才轮换一次，重启服务会复用同一地址
+- 想强制换地址用 `--new-tunnel` 参数
+- 关闭服务时隧道默认**保留**（除非加 `--kill-tunnel-on-exit`）
 - 免费版有流量限制
-- 关闭服务时隧道会自动清理
 
 ### 使用 natapp（备选）
 
@@ -210,21 +262,36 @@ python server.py
 
 ```
 AI-Agent/
-├── server.py           # FastAPI 服务，路由和接口
+├── server.py           # FastAPI 服务，路由和接口（44KB）
 ├── agent.py            # 对话核心逻辑，SSE 流式输出
 ├── config.py           # 配置与模型客户端
-├── model_store.py      # 模型配置的增删改查
+├── model_store.py      # 模型配置增删改查
 ├── db.py               # SQLite 数据层
 ├── docgen.py           # 文档生成（Word/PDF/HTML）
 ├── rag.py              # 知识库检索（向量 + 关键词）
 ├── query_rewrite.py    # 查询改写
 ├── rag_eval.py         # 检索效果评估
 ├── search.py           # 联网搜索
+├── utils.py            # 工具函数
+├── main.py             # 环境自检入口
 ├── static/
-│   └── index.html      # 前端页面（单文件）
-├── eval_data/          # 评估用例
-├── agent.db            # SQLite 数据库（自动生成）
-└── requirements.txt    # 依赖列表
+│   └── index.html      # 前端页面（单文件 125KB）
+├── eval_data/
+│   └── cases.jsonl     # 评估用例
+├── RAG.md              # 知识库实现说明
+├── UPLOAD.md           # 文件上传说明
+├── TUNNEL.md           # 内网穿透说明
+├── NATAPP.md           # natapp 备选方案
+├── SHARE-URL.md        # 公网地址说明
+└── agent.db            # SQLite 数据库（运行时生成）
+
+根目录：
+├── README.md           # 本文件
+├── run.ps1             # 统一启动脚本
+├── share-natapp.ps1    # natapp 备选方案
+├── requirements.txt    # 依赖列表
+├── pyproject.toml      # 项目元信息
+└── .env.example        # 环境变量模板
 ```
 
 ---
