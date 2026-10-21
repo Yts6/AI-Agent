@@ -242,20 +242,6 @@ python server.py --no-tunnel  # 不含隧道
 - 关闭服务时隧道默认**保留**（除非加 `--kill-tunnel-on-exit`）
 - 免费版有流量限制
 
-### 使用 natapp（备选）
-
-如果 cpolar 不可用（某些网络环境有 SNI 阻断），可以试 natapp：
-
-1. 访问 [natapp.cn](https://natapp.cn) 注册并实名认证
-2. 购买免费隧道（Web 类型，端口 8000）
-3. 复制隧道的 authtoken
-4. 下载客户端，放到 `tools/natapp/` 目录
-5. 运行：
-
-```powershell
-.\share-natapp.ps1 -Token 你的authtoken
-```
-
 ---
 
 ## 项目结构
@@ -281,14 +267,12 @@ AI-Agent/
 ├── RAG.md              # 知识库实现说明
 ├── UPLOAD.md           # 文件上传说明
 ├── TUNNEL.md           # 内网穿透说明
-├── NATAPP.md           # natapp 备选方案
 ├── SHARE-URL.md        # 公网地址说明
 └── agent.db            # SQLite 数据库（运行时生成）
 
 根目录：
 ├── README.md           # 本文件
 ├── run.ps1             # 统一启动脚本
-├── share-natapp.ps1    # natapp 备选方案
 ├── requirements.txt    # 依赖列表
 ├── pyproject.toml      # 项目元信息
 └── .env.example        # 环境变量模板
