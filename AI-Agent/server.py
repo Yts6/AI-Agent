@@ -1013,7 +1013,7 @@ def _cleanup_cpolar_conflicts(verbose: bool = True) -> bool:
         print("     解决方法（任选其一）：")
         print("       1. 右键开始菜单 → 终端(管理员)，运行：")
         print("          sc stop cpolar & sc config cpolar start= demand")
-        print("       2. 或运行项目里的 fix-cpolar-service.ps1")
+        print("       2. 或运行项目根目录的 run.ps1 -FixCpolar")
         print()
 
     return clean
