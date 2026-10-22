@@ -82,3 +82,8 @@ _final*.txt
 
 *.bundle
 _backup_repo_*.bundle
+# 无关项目：独立 Python 游戏项目
+A-game/
+
+# 无关项目：独立 HTML 小游戏
+pelican-bike.html
