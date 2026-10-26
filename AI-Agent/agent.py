@@ -337,7 +337,9 @@ def stream_answer(
     # ===== 第 4 步：写入历史 =====
     # 只存干净的问答，不存检索结果，避免上下文无限膨胀
     state.messages.append({"role": "user", "content": question})
-    state.messages.append({"role": "assistant", "content": answer})
+    state.messages.append(
+        {"role": "assistant", "content": answer, "model_id": model}
+    )
     state.trim()
 
     _elapsed = round(_time.time() - _t_start, 1)

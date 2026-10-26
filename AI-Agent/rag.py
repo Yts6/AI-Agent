@@ -789,6 +789,167 @@ def get_kb() -> KnowledgeBase:
     return _kb
 
 
+# ============ 历史消息语义搜索 ============
+# 把历史对话也做成向量索引，支持"我记得之前聊过 XX"式的模糊查找。
+# 向量存 msg_vectors.npy，元信息存 SQLite 的 msg_vectors 表。
+
+MSG_VEC_PATH = STORE_DIR / "msg_vectors.npy"
+
+_msg_vecs: np.ndarray | None = None
+_msg_meta: list[dict] | None = None
+_msg_lock = threading.Lock()
+
+
+def msg_index_available() -> bool:
+    """消息向量索引是否可用（表和文件都存在）。"""
+    return MSG_VEC_PATH.exists() and MSG_VEC_PATH.stat().st_size > 0
+
+
+def rebuild_msg_index(batch_limit: int = 2000) -> dict:
+    """重建历史消息向量索引。
+
+    Returns:
+        {"ok": bool, "count": int, "error": str}
+    """
+    global _msg_vecs, _msg_meta
+
+    try:
+        import db as db_mod
+
+        d = db_mod.get_db()
+        if not d.ensure_msg_vectors_table():
+            return {"ok": False, "count": 0, "error": "数据库只读，无法创建向量表"}
+
+        rows = d.q(
+            "SELECT id, session_id, role, content, created FROM messages "
+            "WHERE role IN ('user', 'assistant') "
+            "ORDER BY id DESC LIMIT ?",
+            (batch_limit,),
+        )
+        if not rows:
+            return {"ok": True, "count": 0, "error": ""}
+
+        items = []
+        for r in rows:
+            content = (r["content"] or "").strip()
+            if not content:
+                continue
+            # 只索引摘要（前 500 字），长回答没必要全存
+            snippet = content[:500]
+            items.append(
+                {
+                    "msg_id": r["id"],
+                    "session_id": r["session_id"],
+                    "role": r["role"],
+                    "snippet": snippet,
+                    "created": r["created"],
+                }
+            )
+
+        if not items:
+            return {"ok": True, "count": 0, "error": ""}
+
+        texts = [f"{it['role']}: {it['snippet']}" for it in items]
+        vecs = embed_texts(texts)  # 可能抛异常（API 不可用）
+
+        STORE_DIR.mkdir(parents=True, exist_ok=True)
+        np.save(MSG_VEC_PATH, vecs)
+
+        with d.tx() as c:
+            c.execute("DELETE FROM msg_vectors")
+        for it in items:
+            d.add_msg_vector(
+                it["msg_id"], it["session_id"], it["role"],
+                it["snippet"], it["created"],
+            )
+
+        with _msg_lock:
+            _msg_vecs = vecs
+            _msg_meta = items
+
+        return {"ok": True, "count": len(items), "error": ""}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "count": 0, "error": f"{type(e).__name__}: {e}"}
+
+
+def _load_msg_index() -> bool:
+    """加载消息向量索引（懒加载）。"""
+    global _msg_vecs, _msg_meta
+
+    if _msg_vecs is not None and _msg_meta is not None:
+        return True
+
+    if not msg_index_available():
+        return False
+
+    try:
+        import db as db_mod
+
+        d = db_mod.get_db()
+        meta = d.list_msg_vectors()
+        if not meta:
+            return False
+
+        vecs = np.load(MSG_VEC_PATH)
+        if vecs.ndim != 2 or vecs.shape[1] != EMBED_DIM:
+            return False
+        if vecs.shape[0] != len(meta):
+            n = min(vecs.shape[0], len(meta))
+            vecs = vecs[:n]
+            meta = meta[:n]
+
+        with _msg_lock:
+            _msg_vecs = vecs
+            _msg_meta = meta
+        return True
+    except Exception:
+        return False
+
+
+def search_messages(query: str, top_k: int = 8) -> list[dict]:
+    """在历史消息里做语义搜索。
+
+    Returns:
+        [{session_id, role, snippet, score, created}, ...]
+    """
+    if not query or not query.strip():
+        return []
+
+    if not _load_msg_index():
+        return []
+
+    try:
+        qv = embed_texts([query])[0]
+    except Exception:
+        return []
+
+    with _msg_lock:
+        vecs = _msg_vecs
+        meta = _msg_meta
+
+    if vecs is None or not len(meta or []):
+        return []
+
+    scores = vecs @ qv
+    order = np.argsort(-scores)[:top_k]
+
+    out = []
+    for idx in order:
+        if scores[idx] < 0.25:  # 太低的不要
+            continue
+        m = meta[int(idx)]
+        out.append(
+            {
+                "session_id": m["session_id"],
+                "role": m["role"],
+                "snippet": m["snippet"],
+                "score": round(float(scores[idx]), 3),
+                "created": m["created"],
+            }
+        )
+    return out
+
+
 if __name__ == "__main__":
     import sys
 

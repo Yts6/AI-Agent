@@ -145,23 +145,59 @@ def _get_session(sid: str) -> tuple[str, ChatState]:
             _sessions[sid] = restored
             return sid, restored
         st = ChatState()
-        _DB.ensure_session(sid, "新对话")
+        _safe_ensure_session(sid, "新对话")
         _sessions[sid] = st
         return sid, st
 
     new_sid = uuid.uuid4().hex
     state = ChatState()
-    _DB.ensure_session(new_sid, "新对话")
+    _safe_ensure_session(new_sid, "新对话")
     _sessions[new_sid] = state
     return new_sid, state
 
 
+# 数据库是否可写（首次写失败后置为 False，后续直接跳过写盘）
+_DB_WRITABLE: bool | None = None
+
+
+def _db_writable() -> bool:
+    """探测数据库是否可写（结果缓存）。"""
+    global _DB_WRITABLE
+    if _DB_WRITABLE is None:
+        try:
+            with _DB.tx() as c:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS _wprobe (a TEXT)"
+                )
+                c.execute("DROP TABLE IF EXISTS _wprobe")
+            _DB_WRITABLE = True
+        except Exception:
+            _DB_WRITABLE = False
+            print(
+                "[WARN] 数据库为只读，本次运行的数据不会持久化（会话在内存中保留）"
+            )
+    return _DB_WRITABLE
+
+
+def _safe_ensure_session(sid: str, title: str = "新对话") -> None:
+    """创建会话；只读时静默跳过。"""
+    if not _db_writable():
+        return
+    try:
+        _DB.ensure_session(sid, title)
+    except Exception:
+        global _DB_WRITABLE
+        _DB_WRITABLE = False
+
+
+def _safe_save_session(sid: str, state: ChatState) -> None:
+    """保存会话；只读时静默跳过。"""
+    if not _db_writable():
+        return
+    _save_session(sid, state)
+
+
 def _sse(payload: dict) -> str:
-    """包装成 SSE 格式。"""
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-
     """包装成 SSE 格式。"""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -433,14 +469,14 @@ async def chat(req: ChatRequest, request: Request, _: None = Depends(check_auth)
                                     m["thinking_ms"] = int(thinking * 1000)
                                 break
                     # 立即落盘，不要等 finally（客户端读完就断开，finally 可能不执行）
-                    _save_session(sid, state)
+                    _safe_save_session(sid, state)
                     finished = True
         except Exception as e:  # noqa: BLE001
             yield _sse({"type": "error", "message": str(e)})
         finally:
             # 兜底：异常或中途断开也保存已生成的部分
             if not finished:
-                _save_session(sid, state)
+                _safe_save_session(sid, state)
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
@@ -466,7 +502,7 @@ async def reset(req: ResetRequest, _: None = Depends(check_auth)) -> dict:
 async def list_sessions(
     limit: int = 100, _: None = Depends(check_auth)
 ) -> dict:
-    """列出所有历史会话，按更新时间倒序。"""
+    """列出所有历史会话：置顶优先，其余按更新时间倒序。"""
     items = _DB.list_sessions(limit=limit)
     return {
         "sessions": [
@@ -475,9 +511,12 @@ async def list_sessions(
                 "title": s["title"],
                 "created": s["created"],
                 "updated": s["updated"],
+                "group": s.get("grp") or "",
+                "pinned": bool(s.get("pinned")),
             }
             for s in items
-        ]
+        ],
+        "groups": _DB.list_groups(),
     }
 
 
@@ -519,6 +558,77 @@ async def rename_session(
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"status": "ok", "title": title}
 
+@app.patch("/api/sessions/{sid}/group")
+async def set_session_group(
+    sid: str, req: dict = Body(...), _: None = Depends(check_auth)
+) -> dict:
+    """调整会话所属分组 / 置顶状态。
+
+    body: {"group": "工作"} 或 {"pinned": true}
+    """
+    changed = False
+
+    if "group" in req:
+        grp = (req.get("group") or "").strip()[:30]
+        if _DB.set_session_group(sid, grp):
+            changed = True
+
+    if "pinned" in req:
+        if _DB.set_session_pinned(sid, bool(req["pinned"])):
+            changed = True
+
+    if not changed:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"status": "ok"}
+
+
+@app.get("/api/groups")
+async def get_groups(_: None = Depends(check_auth)) -> dict:
+    """列出所有分组。"""
+    return {"groups": _DB.list_groups()}
+
+
+@app.post("/api/groups/rename")
+async def rename_group_endpoint(
+    req: dict = Body(...), _: None = Depends(check_auth)
+) -> dict:
+    """重命名分组（批量移动该组下所有会话）。"""
+    old = (req.get("old") or "").strip()
+    new = (req.get("new") or "").strip()[:30]
+    if not old or not new:
+        raise HTTPException(status_code=400, detail="新旧名称都不能为空")
+    n = _DB.rename_group(old, new)
+    return {"status": "ok", "moved": n}
+
+
+@app.post("/api/groups/delete")
+async def delete_group_endpoint(
+    req: dict = Body(...), _: None = Depends(check_auth)
+) -> dict:
+    """删除分组，组内会话回到「未分组」。"""
+    grp = (req.get("group") or "").strip()
+    if not grp:
+        raise HTTPException(status_code=400, detail="分组名不能为空")
+    n = _DB.delete_group(grp)
+    return {"status": "ok", "moved": n}
+
+
+@app.post("/api/sessions/batch-delete")
+async def batch_delete_sessions(
+    req: dict = Body(...), _: None = Depends(check_auth)
+) -> dict:
+    """批量删除会话。"""
+    ids = req.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="ids 不能为空")
+    n = 0
+    for sid in ids:
+        _sessions.pop(sid, None)
+        if _DB.delete_session(str(sid)):
+            n += 1
+    return {"status": "ok", "deleted": n}
+
+
 
 @app.get("/api/sessions/search/{keyword}")
 async def search_sessions(keyword: str, _: None = Depends(check_auth)) -> dict:
@@ -542,6 +652,63 @@ async def search_sessions(keyword: str, _: None = Depends(check_auth)) -> dict:
             for r in rows
         ],
     }
+
+
+@app.get("/api/semantic-search")
+async def semantic_search(
+    q: str, top_k: int = 8, _: None = Depends(check_auth)
+) -> dict:
+    """语义搜索历史消息（基于向量相似度）。
+
+    需要先构建消息向量索引，否则返回空结果并提示。
+    """
+    if not q or not q.strip():
+        raise HTTPException(status_code=400, detail="搜索词不能为空")
+
+    if not rag_mod.msg_index_available():
+        return {
+            "query": q,
+            "results": [],
+            "available": False,
+            "hint": "消息向量索引未构建，可在设置 → 工具里点「重建索引」",
+        }
+
+    try:
+        hits = rag_mod.search_messages(q, top_k=min(max(top_k, 1), 30))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"语义搜索失败：{e}")
+
+    # 补上会话标题
+    titles = {s["id"]: s["title"] for s in _DB.list_sessions(limit=500)}
+    for h in hits:
+        h["title"] = titles.get(h["session_id"], "（已删除会话）")
+
+    return {"query": q, "results": hits, "available": True}
+
+
+@app.post("/api/msg-index/rebuild")
+async def rebuild_msg_index(_: None = Depends(check_auth)) -> dict:
+    """重建历史消息向量索引。"""
+    try:
+        r = rag_mod.rebuild_msg_index()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"重建失败：{e}")
+    if not r.get("ok"):
+        raise HTTPException(status_code=400, detail=r.get("error") or "重建失败")
+    return r
+
+
+@app.get("/api/msg-index/status")
+async def msg_index_status(_: None = Depends(check_auth)) -> dict:
+    """查看消息向量索引状态。"""
+    available = rag_mod.msg_index_available()
+    count = 0
+    if available:
+        try:
+            count = len(_DB.list_msg_vectors())
+        except Exception:
+            count = 0
+    return {"available": available, "count": count}
 
 
 @app.get("/api/stats")

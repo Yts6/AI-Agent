@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     id       TEXT PRIMARY KEY,
     title    TEXT NOT NULL DEFAULT '新对话',
     created  REAL NOT NULL,
-    updated  REAL NOT NULL
+    updated  REAL NOT NULL,
+    grp      TEXT DEFAULT '',
+    pinned   INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated DESC);
 
@@ -52,6 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
     created     REAL NOT NULL,
     reasoning   TEXT,
     thinking_ms INTEGER,
+    model_id    TEXT DEFAULT '',
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
@@ -108,8 +111,9 @@ class Database:
         )
         self._conn.row_factory = sqlite3.Row
         with self._lock:
-            self._conn.executescript(_SCHEMA)
+            # 先补列：executescript 会隐式提交，ALTER 后再执行 schema 建索引才有效
             self._migrate_columns()
+            self._conn.executescript(_SCHEMA)
             self._conn.commit()
 
     def _migrate_columns(self) -> None:
@@ -125,8 +129,30 @@ class Database:
                 self._conn.execute(
                     "ALTER TABLE messages ADD COLUMN thinking_ms INTEGER"
                 )
-        except Exception:
-            pass
+            if "model_id" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE messages ADD COLUMN model_id TEXT DEFAULT ''"
+                )
+
+            # sessions 表补列（分组 + 置顶）
+            scols = {
+                r["name"]
+                for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "grp" not in scols:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN grp TEXT DEFAULT ''")
+            if "pinned" not in scols:
+                self._conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0"
+                )
+
+            # 列补齐后再建索引（老库原本没有 grp 列）
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_group "
+                "ON sessions(grp, updated DESC)"
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[db] 迁移列失败: {type(e).__name__} {e}")
 
     # ---------- 底层 ----------
 
@@ -152,13 +178,41 @@ class Database:
 
     # ---------- 会话 ----------
 
+    def _has_col(self, table: str, col: str) -> bool:
+        """检查某表是否有某列（用于兼容尚未迁移的老库）。"""
+        try:
+            cols = {
+                r["name"]
+                for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            return col in cols
+        except Exception:
+            return False
+
     def list_sessions(self, limit: int = 200) -> list[dict]:
-        rows = self.q(
-            "SELECT id, title, created, updated FROM sessions "
-            "ORDER BY updated DESC LIMIT ?",
-            (limit,),
-        )
+        """列出会话，置顶优先，其余按更新时间倒序。
+
+        老库没有 grp/pinned 列时自动降级为纯时间排序，
+        保证只读环境下也能正常使用。
+        """
+        has_grp = self._has_col("sessions", "grp")
+        has_pin = self._has_col("sessions", "pinned")
+
+        if has_grp and has_pin:
+            sql = (
+                "SELECT id, title, created, updated, grp, pinned FROM sessions "
+                "ORDER BY pinned DESC, updated DESC LIMIT ?"
+            )
+        else:
+            sql = (
+                "SELECT id, title, created, updated, "
+                "'' AS grp, 0 AS pinned FROM sessions "
+                "ORDER BY updated DESC LIMIT ?"
+            )
+
+        rows = self.q(sql, (limit,))
         return [dict(r) for r in rows]
+
 
     def get_session(self, sid: str) -> dict | None:
         row = self.q1("SELECT * FROM sessions WHERE id = ?", (sid,))
@@ -203,12 +257,64 @@ class Database:
             cur = c.execute("DELETE FROM sessions WHERE id = ?", (sid,))
             return cur.rowcount > 0
 
+    def set_session_group(self, sid: str, grp: str) -> bool:
+        """把会话移到一个分组（空字符串表示未分组）。"""
+        with self.tx() as c:
+            cur = c.execute(
+                "UPDATE sessions SET grp = ? WHERE id = ?", (grp or "", sid)
+            )
+            return cur.rowcount > 0
+
+    def set_session_pinned(self, sid: str, pinned: bool) -> bool:
+        with self.tx() as c:
+            cur = c.execute(
+                "UPDATE sessions SET pinned = ? WHERE id = ?",
+                (1 if pinned else 0, sid),
+            )
+            return cur.rowcount > 0
+
+    def list_groups(self) -> list[str]:
+        """返回所有非空分组名（去重、排序）。老库无 grp 列时返回空列表。"""
+        if not self._has_col("sessions", "grp"):
+            return []
+        try:
+            rows = self.q(
+                "SELECT DISTINCT grp FROM sessions "
+                "WHERE grp IS NOT NULL AND grp != '' ORDER BY grp"
+            )
+            return [r["grp"] for r in rows]
+        except Exception:
+            return []
+
+    def rename_group(self, old: str, new: str) -> int:
+        """重命名分组，返回影响的会话数。"""
+        if not new or new == old:
+            return 0
+        with self.tx() as c:
+            cur = c.execute(
+                "UPDATE sessions SET grp = ? WHERE grp = ?", (new, old)
+            )
+            return cur.rowcount
+
+    def delete_group(self, grp: str) -> int:
+        """删除分组（会话回到未分组状态），返回影响的会话数。"""
+        with self.tx() as c:
+            cur = c.execute(
+                "UPDATE sessions SET grp = '' WHERE grp = ?", (grp,)
+            )
+            return cur.rowcount
+
     # ---------- 消息 ----------
 
     def get_messages(self, sid: str) -> list[dict]:
+        has_model = self._has_col("messages", "model_id")
+        cols = (
+            "role, content, created, reasoning, thinking_ms, model_id"
+            if has_model
+            else "role, content, created, reasoning, thinking_ms, '' AS model_id"
+        )
         rows = self.q(
-            "SELECT role, content, created, reasoning, thinking_ms "
-            "FROM messages WHERE session_id = ? ORDER BY id",
+            f"SELECT {cols} FROM messages WHERE session_id = ? ORDER BY id",
             (sid,),
         )
         return [
@@ -218,6 +324,7 @@ class Database:
                 "created": r["created"],
                 "reasoning": r["reasoning"] or "",
                 "thinking_ms": r["thinking_ms"] or 0,
+                "model_id": r["model_id"] or "",
             }
             for r in rows
         ]
@@ -239,19 +346,36 @@ class Database:
             for m in messages:
                 if m.get("role") == "system":
                     continue
-                c.execute(
-                    "INSERT INTO messages"
-                    "(session_id, role, content, created, reasoning, thinking_ms) "
-                    "VALUES (?,?,?,?,?,?)",
-                    (
-                        sid,
-                        m.get("role", "user"),
-                        m.get("content", ""),
-                        m.get("created") or now,
-                        m.get("reasoning") or "",
-                        int(m.get("thinking_ms") or 0),
-                    ),
-                )
+                # 老库可能还没有 model_id 列，按实际列名插入
+                if self._has_col("messages", "model_id"):
+                    c.execute(
+                        "INSERT INTO messages"
+                        "(session_id, role, content, created, reasoning, "
+                        "thinking_ms, model_id) VALUES (?,?,?,?,?,?,?)",
+                        (
+                            sid,
+                            m.get("role", "user"),
+                            m.get("content", ""),
+                            m.get("created") or now,
+                            m.get("reasoning") or "",
+                            int(m.get("thinking_ms") or 0),
+                            m.get("model_id") or "",
+                        ),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO messages"
+                        "(session_id, role, content, created, reasoning, "
+                        "thinking_ms) VALUES (?,?,?,?,?,?)",
+                        (
+                            sid,
+                            m.get("role", "user"),
+                            m.get("content", ""),
+                            m.get("created") or now,
+                            m.get("reasoning") or "",
+                            int(m.get("thinking_ms") or 0),
+                        ),
+                    )
             c.execute("UPDATE sessions SET updated = ? WHERE id = ?", (now, sid))
 
     def count_messages(self, sid: str) -> int:
@@ -301,6 +425,67 @@ class Database:
     def clear_chunks(self) -> None:
         with self.tx() as c:
             c.execute("DELETE FROM chunks")
+
+    # ---------- 消息向量（语义搜索历史） ----------
+
+    def ensure_msg_vectors_table(self) -> bool:
+        """创建消息向量表。只读环境返回 False。"""
+        try:
+            with self.tx() as c:
+                c.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS msg_vectors (
+                        msg_id    INTEGER PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        role      TEXT NOT NULL,
+                        snippet   TEXT NOT NULL,
+                        created   REAL NOT NULL,
+                        FOREIGN KEY (msg_id) REFERENCES messages(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_mv_session
+                        ON msg_vectors(session_id);
+                    """
+                )
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"[db] 消息向量表创建失败（可能是只读库）: {type(e).__name__}")
+            return False
+
+    def has_msg_vectors(self) -> bool:
+        """检查消息向量表是否存在。"""
+        try:
+            row = self.q1(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='msg_vectors'"
+            )
+            return bool(row)
+        except Exception:
+            return False
+
+    def add_msg_vector(self, msg_id: int, sid: str, role: str, snippet: str, created: float) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO msg_vectors"
+                "(msg_id, session_id, role, snippet, created) VALUES (?,?,?,?,?)",
+                (msg_id, sid, role, snippet[:500], created),
+            )
+
+    def list_msg_vectors(self) -> list[dict]:
+        if not self.has_msg_vectors():
+            return []
+        try:
+            rows = self.q(
+                "SELECT msg_id, session_id, role, snippet, created "
+                "FROM msg_vectors ORDER BY msg_id"
+            )
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def clear_msg_vectors(self) -> None:
+        if not self.has_msg_vectors():
+            return
+        with self.tx() as c:
+            c.execute("DELETE FROM msg_vectors")
 
     # ---------- 模型 ----------
 

@@ -87,3 +87,13 @@ A-game/
 
 # 无关项目：独立 HTML 小游戏
 pelican-bike.html
+
+# 临时脚本与产物
+_*.js
+_*.mjs
+_*.ps1
+_*.txt
+_*.log
+fix_venv.py
+AI-Agent/_probe.db
+AI-Agent/_*.db
